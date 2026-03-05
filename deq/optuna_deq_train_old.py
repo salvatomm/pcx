@@ -13,8 +13,8 @@ TRAIN_BATCH_SIZE = 256
 TEST_BATCH_SIZE = 1000
 DATA_ROOT = "~/tmp/cifar10/"
 
-N_EPOCHS_SEARCH = 50
-N_TRIALS = 50
+N_EPOCHS_SEARCH = 100
+N_TRIALS = 100
 N_GPU_WORKERS = 2
 STOP_GRAD_F = True
 
@@ -86,38 +86,40 @@ def make_objective(train_dl, test_dl, *, n_epochs: int, batch_size: int, deps, c
 
     if STOP_GRAD_F:
 
+        # 50 epochs gets 75.5%
         baseline = dict(
             T_train=300,
-            nudging=0.1,
-            lr_w=0.001,
-            wd_w=0.03,
+            nudging=0.2,
+            lr_w=0.0005,
+            wd_w=0.01,
             lr_h=0.2,
-            mom_h=0.5,
-            init_scale=0.005,
+            mom_h=0.4,
+            init_scale=0.001,
         )
 
     else:
 
+        # logcosh Energy gets 75.8% 100 epochs
         baseline = dict(
-            T_train=250,
-            nudging=0.025,
-            lr_w=0.001,
-            wd_w=0.03,
-            lr_h=0.2,
-            mom_h=0.9,
-            init_scale=0.00001,
+            T_train=190,
+            nudging=0.25,
+            lr_w=0.0005,
+            wd_w=0.01,
+            lr_h=0.25,
+            mom_h=0.55,
+            init_scale=0.005,
         )
 
     def objective(trial: optuna.Trial) -> float:
         px.RKG.seed(SEED)
 
-        T_train = trial.suggest_int("T_train", 250, 350)
-        nudging = trial.suggest_float("nudging", 0.05, 0.25, log=True)
-        lr_w = trial.suggest_float("lr_w", 0.00025, 0.0025, log=True)
-        wd_w = trial.suggest_float("wd_w", 0.001, 0.05, log=True)
-        lr_h = trial.suggest_float("lr_h", 0.05, 0.5, log=True)
-        mom_h = trial.suggest_float("mom_h", 0.25, 0.75, log=True)
-        init_scale = trial.suggest_float("init_scale", 0.00005, 0.005, log=True)
+        T_train = trial.suggest_int("T_train", 180, 220)
+        nudging = trial.suggest_float("nudging", 0.1, 0.3, log=True)
+        lr_w = trial.suggest_float("lr_w", 0.0002, 0.007, log=True)
+        wd_w = trial.suggest_float("wd_w", 0.0005, 0.05, log=True)
+        lr_h = trial.suggest_float("lr_h", 0.25, 0.5, log=True)
+        mom_h = trial.suggest_float("mom_h", 0.4, 0.7, log=True)
+        init_scale = trial.suggest_float("init_scale", 0.001, 0.005, log=True)
 
         T_eval = T_train
 
@@ -197,15 +199,15 @@ def run_worker(local_gpu: int, n_trials_worker: int, storage: str, study_name: s
         load_if_exists=True,
     )
 
-    if local_gpu == 0 and len(study.trials) == 0:
-        study.enqueue_trial(baseline)
+    #if local_gpu == 0 and len(study.trials) == 0:
+    #    study.enqueue_trial(baseline)
 
     study.optimize(objective, n_trials=n_trials_worker, gc_after_trial=True, show_progress_bar=False)
 
 
 def main():
     storage = "sqlite:///deqpc_optuna.db"
-    study_name = "deqpc_cifar10_long_stopgradient_50_epochs"
+    study_name = "deqpc_cifar10_logcosh_energy_100_epochs"
 
     workers = N_GPU_WORKERS
     trials_per_worker = [N_TRIALS // workers] * workers
