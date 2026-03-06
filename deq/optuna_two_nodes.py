@@ -13,14 +13,14 @@ import optuna
 
 SEED = 0
 N_CLASSES = 10
-N_CHANNELS = 48
+N_CHANNELS = 256
 
 BATCH_SIZE_CHOICES = [64, 128, 256]
 TEST_BATCH_SIZE = 1000
 DATA_ROOT = "~/tmp/cifar10/"
 
-N_EPOCHS_SEARCH = 10
-N_TRIALS = 300
+N_EPOCHS_SEARCH = 50
+N_TRIALS = 50
 N_GPU_WORKERS = 2
 STOP_GRAD_F = False
 ENERGY_TYPE = "se"
@@ -103,18 +103,18 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
     def _get_dls(batch_size: int):
         if batch_size not in _dl_cache:
             _dl_cache[batch_size] = get_dataloaders(
-                batch_size, TEST_BATCH_SIZE, root=DATA_ROOT,
+                batch_size, TEST_BATCH_SIZE, root=DATA_ROOT, augmentation=True,
             )
         return _dl_cache[batch_size]
 
     baseline = dict(
         batch_size=256,
-        T_train=300,
-        nudging=0.1,
-        lr_w=5e-4,
-        wd_w=5e-3,
-        lr_h=0.2,
-        mom_h=0.5,
+        T_train=120,
+        nudging=0.17,
+        lr_w=0.0008,
+        wd_w=0.005,
+        lr_h=0.15,
+        mom_h=0.6,
         init_scale=0.005,
     )
 
@@ -122,13 +122,13 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
         px.RKG.seed(SEED)
 
         batch_size = trial.suggest_categorical("batch_size", BATCH_SIZE_CHOICES)
-        T_train    = trial.suggest_int("T_train", 200, 400)
-        nudging    = trial.suggest_float("nudging", 0.05, 0.3, log=True)
-        lr_w       = trial.suggest_float("lr_w", 2e-4, 5e-3, log=True)
-        wd_w       = trial.suggest_float("wd_w", 5e-4, 0.05, log=True)
-        lr_h       = trial.suggest_float("lr_h", 0.1, 0.5, log=True)
-        mom_h      = trial.suggest_float("mom_h", 0.3, 0.7, log=True)
-        init_scale = trial.suggest_float("init_scale", 0.001, 0.01, log=True)
+        T_train    = trial.suggest_int("T_train", 80, 120)
+        nudging    = trial.suggest_float("nudging", 0.1, 0.3, log=True)
+        lr_w       = trial.suggest_float("lr_w", 0.0005, 0.001, log=True)
+        wd_w       = trial.suggest_float("wd_w", 0.001, 0.01, log=True)
+        lr_h       = trial.suggest_float("lr_h", 0.1, 0.3, log=True)
+        mom_h      = trial.suggest_float("mom_h", 0.6, 0.9, log=True)
+        init_scale = trial.suggest_float("init_scale", 0.001, 0.005, log=True)
 
         T_eval = T_train
         train_dl, test_dl = _get_dls(batch_size)
