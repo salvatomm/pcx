@@ -14,6 +14,7 @@ def evaluate_accuracy(
     model,
     optim_h,
     eval_fn: Callable,
+    lr_decay: float = 1.0,
     max_samples: int | None = None,
 ) -> float:
     """Run *eval_fn* over a dataloader and return mean accuracy."""
@@ -22,7 +23,8 @@ def evaluate_accuracy(
     n_classes = int(model.n_classes.get())
     for x, y in dl:
         y_oh = jax.nn.one_hot(y.numpy(), n_classes)
-        accs.append(eval_fn(T_steps, x.numpy(), y_oh, model=model, optim_h=optim_h))
+        accs.append(eval_fn(T_steps, x.numpy(), y_oh, lr_decay,
+                            model=model, optim_h=optim_h))
         seen += x.shape[0]
         if max_samples is not None and seen >= max_samples:
             break
@@ -36,12 +38,13 @@ def evaluate_epoch(
     model,
     optim_h,
     eval_fn: Callable,
+    lr_decay: float = 1.0,
 ):
-    """Evaluate on both splits and return (train_acc, test_acc, wall_time)."""
+    """Evaluate on test split and return (test_acc, wall_time)."""
     t0 = time.perf_counter()
 
     test_acc = evaluate_accuracy(
         test_dl, T_steps, model=model, optim_h=optim_h,
-        eval_fn=eval_fn,
+        eval_fn=eval_fn, lr_decay=lr_decay,
     )
     return test_acc, time.perf_counter() - t0

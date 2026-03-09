@@ -5,8 +5,8 @@ Works with any model that implements the common interface:
 
 Public API
 ----------
-    train_on_batch(T, x, y, *, model, optim_w, optim_h)
-    eval_on_batch (T, x, y_oh, *, model, optim_h)
+    train_on_batch(T, x, y, lr_decay, *, model, optim_w, optim_h)
+    eval_on_batch (T, x, y_oh, lr_decay, *, model, optim_h)
 """
 
 import jax
@@ -26,17 +26,23 @@ _w_mask = pxu.M(pxnn.LayerParam).to([False, True])
 
 # ── Inference loop ────────────────────────────────────────────────────
 
-def _run_inference_loop(T, z_h, x_inj, label_h, h_opt, model):
-    """Minimise E(z) for *T* steps via the model's ``latent_energy``."""
+def _run_inference_loop(T, z_h, x_inj, label_h, h_opt, model, lr_decay):
+    """Minimise E(z) for *T* steps via the model's ``latent_energy``.
+
+    At iteration i the effective learning rate is lr * lr_decay**i.
+    Since we cannot mutate the optax optimizer's lr inside fori_loop,
+    we scale the *updates* instead — mathematically identical.
+    """
     h_opt_state = h_opt.init(z_h)
 
     energy_fn = lambda z, xi, lab: model.latent_energy(z, xi, lab)
     grad_fn = jax.vmap(jax.grad(energy_fn))
 
-    def body(_, carry):
+    def body(i, carry):
         z_h, opt_state = carry
         g = grad_fn(z_h, x_inj, label_h)
         updates, opt_state = h_opt.update(g, opt_state, z_h)
+        updates = updates * (lr_decay ** i)
         z_h = optax.apply_updates(z_h, updates)
         return z_h, opt_state
 
@@ -60,7 +66,7 @@ def _predict_cached(*, model):
 # ── Public API ────────────────────────────────────────────────────────
 
 @pxf.jit(static_argnums=0)
-def train_on_batch(T, x, y, *, model, optim_w, optim_h):
+def train_on_batch(T, x, y, lr_decay, *, model, optim_w, optim_h):
     model.train()
 
     # 1. Embed & initialise latents
@@ -75,7 +81,7 @@ def train_on_batch(T, x, y, *, model, optim_w, optim_h):
     h_opt = optim_h.optax_opt_fn()
     z_h = _run_inference_loop(
         T, model.get_latents(), model.x_inj_cache.get(),
-        model.vode_out.h.get(), h_opt, model,
+        model.vode_out.h.get(), h_opt, model, lr_decay,
     )
     model.set_latents(z_h)
 
@@ -88,7 +94,7 @@ def train_on_batch(T, x, y, *, model, optim_w, optim_h):
 
 
 @pxf.jit(static_argnums=0)
-def eval_on_batch(T, x, y_oh, *, model, optim_h):
+def eval_on_batch(T, x, y_oh, lr_decay, *, model, optim_h):
     model.eval()
 
     with pxu.step(model, clear_params=pxc.VodeParam.Cache):
@@ -101,7 +107,7 @@ def eval_on_batch(T, x, y_oh, *, model, optim_h):
     h_opt = optim_h.optax_opt_fn()
     z_h = _run_inference_loop(
         T, model.get_latents(), model.x_inj_cache.get(),
-        jnp.zeros_like(y_oh), h_opt, model,
+        jnp.zeros_like(y_oh), h_opt, model, lr_decay,
     )
     model.set_latents(z_h)
 
