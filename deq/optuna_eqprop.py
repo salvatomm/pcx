@@ -1,7 +1,9 @@
-"""Optuna hyperparameter search for the 2-vode MultiVodeDEQPCModel.
+"""Optuna hyperparameter search for Equilibrium Propagation DEQ-PC.
+
+Searches over T_free, T_nudg, nudging, learning rates, momentum,
+spectral norm target, batch size, and init scale.
 
 Spawns N_GPU_WORKERS processes, one per GPU, sharing a single SQLite study.
-Batch size is searched over {64, 128, 256}.
 After all workers finish, saves study visualisations to ``optuna_plots/``.
 """
 
@@ -14,44 +16,42 @@ import optuna
 
 SEED = 0
 N_CLASSES = 10
-N_CHANNELS = 128
+N_CHANNELS = 256
 
 BATCH_SIZE_CHOICES = [64, 128, 256]
-# Categorical choices for T_train to bound JIT recompilation.
-# Each unique (T_train, batch_size) pair compiles new XLA programs for both
-# train and eval; free integers would accumulate cached compilations and OOM.
-T_TRAIN_CHOICES = [60, 80, 100, 120, 150]
+# Categorical choices for T_free / T_nudg to bound JIT recompilation.
+# Each unique (T_free, T_nudg, batch_size) triple compiles a new XLA program
+# for both train and eval; free integers would explode the cache and OOM.
+T_FREE_CHOICES = [40, 60, 80, 100, 120]
+T_NUDG_CHOICES = [5, 10, 20, 30, 40]
 TEST_BATCH_SIZE = 1000
 DATA_ROOT = "~/tmp/cifar10/"
 
 N_EPOCHS_SEARCH = 20
-N_TRIALS = 100
+N_TRIALS = 50
 N_GPU_WORKERS = 2
 STOP_GRAD_F = False
 ENERGY_TYPE = "se"
 LR_DECAY_H = 0.97
-SPECTRAL_TARGET = 0.95
 
-PLOT_DIR = "optuna_plots"
+PLOT_DIR = "optuna_plots_ep"
 
 
 def get_visible_gpu_tokens():
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cuda_visible is not None and cuda_visible.strip() != "":
-        tokens = [token.strip() for token in cuda_visible.split(",") if token.strip() != ""]
+        tokens = [t.strip() for t in cuda_visible.split(",") if t.strip()]
         return tokens
 
     try:
         result = subprocess.run(
             ["nvidia-smi", "-L"],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True,
         )
     except Exception:
         return []
 
-    lines = [line for line in result.stdout.splitlines() if line.strip().startswith("GPU ")]
+    lines = [l for l in result.stdout.splitlines() if l.strip().startswith("GPU ")]
     return [str(i) for i in range(len(lines))]
 
 
@@ -66,7 +66,7 @@ def load_runtime_deps():
     import pcx.utils as pxu
 
     from deq.models import MultiVodeDEQPCModel
-    from deq.training import train_on_batch, eval_on_batch
+    from deq.training import train_on_batch_ep, eval_on_batch_ep
     from deq.evaluation import evaluate_accuracy
     from deq.data import get_dataloaders
     from deq.spectral_norm import SpectralProjector
@@ -82,8 +82,8 @@ def load_runtime_deps():
         "evaluate_accuracy": evaluate_accuracy,
         "MultiVodeDEQPCModel": MultiVodeDEQPCModel,
         "get_dataloaders": get_dataloaders,
-        "train_on_batch": train_on_batch,
-        "eval_on_batch": eval_on_batch,
+        "train_on_batch_ep": train_on_batch_ep,
+        "eval_on_batch_ep": eval_on_batch_ep,
         "SpectralProjector": SpectralProjector,
     }
 
@@ -100,13 +100,13 @@ def assert_gpu_backend(jax):
         sys.exit(1)
 
 
-def train_epoch(train_dl, T_steps, lr_decay, *,
+def train_epoch(train_dl, T_free, T_nudg, lr_decay, *,
                 model, optim_w, optim_h, projector, deps):
     jax = deps["jax"]
-    train_on_batch = deps["train_on_batch"]
+    train_on_batch_ep = deps["train_on_batch_ep"]
     for x, y in train_dl:
-        train_on_batch(
-            T_steps,
+        train_on_batch_ep(
+            T_free, T_nudg,
             x.numpy(),
             jax.nn.one_hot(y.numpy(), N_CLASSES),
             lr_decay,
@@ -126,12 +126,11 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
     pxc = deps["pxc"]
     pxu = deps["pxu"]
     evaluate_accuracy = deps["evaluate_accuracy"]
-    eval_on_batch = deps["eval_on_batch"]
+    eval_on_batch_ep = deps["eval_on_batch_ep"]
     MultiVodeDEQPCModel = deps["MultiVodeDEQPCModel"]
     get_dataloaders = deps["get_dataloaders"]
     SpectralProjector = deps["SpectralProjector"]
 
-    # Cache dataloaders per batch size to avoid re-downloading per trial.
     _dl_cache = {}
 
     def _get_dls(batch_size: int):
@@ -143,7 +142,8 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
 
     baseline = dict(
         batch_size=256,
-        T_train=120,
+        T_free=100,
+        T_nudg=20,
         nudging=0.17,
         lr_w=0.0008,
         wd_w=0.005,
@@ -155,15 +155,16 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
 
     def objective(trial: optuna.Trial) -> float:
         # Free cached JIT compilations from previous trials to avoid OOM.
-        # Each unique (T_train, batch_size) pair compiles new XLA programs;
+        # Each (T_free, T_nudg, batch_size) triple compiles new XLA programs;
         # without clearing, these accumulate on device across trials.
         jax.clear_caches()
 
         px.RKG.seed(SEED)
 
         batch_size = trial.suggest_categorical("batch_size", BATCH_SIZE_CHOICES)
-        T_train    = trial.suggest_categorical("T_train", T_TRAIN_CHOICES)
-        nudging    = trial.suggest_float("nudging", 0.01, 0.2, log=True)
+        T_free     = trial.suggest_categorical("T_free", T_FREE_CHOICES)
+        T_nudg     = trial.suggest_categorical("T_nudg", T_NUDG_CHOICES)
+        nudging    = trial.suggest_float("nudging", 0.01, 0.3, log=True)
         lr_w       = trial.suggest_float("lr_w", 0.00005, 0.001, log=True)
         wd_w       = trial.suggest_float("wd_w", 0.0001, 0.05, log=True)
         lr_h       = trial.suggest_float("lr_h", 0.1, 0.5, log=True)
@@ -171,7 +172,6 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
         init_scale = trial.suggest_float("init_scale", 0.0001, 0.005, log=True)
         spectral_constant = trial.suggest_float("spectral_constant", 0.90, 0.99)
 
-        T_eval = T_train
         train_dl, test_dl = _get_dls(batch_size)
 
         model = MultiVodeDEQPCModel(
@@ -202,7 +202,7 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
             pxu.M(pxnn.LayerParam)(model),
         )
 
-        # Warmup — model-agnostic interface (matches run_multi_vode.py)
+        # Warmup — model-agnostic interface
         with pxu.step(model, clear_params=pxc.VodeParam.Cache):
             x0 = jnp.zeros((batch_size, 3, 32, 32))
             y0 = jnp.zeros((batch_size, N_CLASSES))
@@ -215,14 +215,14 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
         best = 0.0
         for epoch in range(1, n_epochs + 1):
             train_epoch(
-                train_dl, T_train, LR_DECAY_H,
+                train_dl, T_free, T_nudg, LR_DECAY_H,
                 model=model, optim_w=optim_w, optim_h=optim_h,
                 projector=projector, deps=deps,
             )
             acc = evaluate_accuracy(
-                test_dl, T_eval,
+                test_dl, (T_free, T_nudg),
                 model=model, optim_h=optim_h,
-                eval_fn=eval_on_batch,
+                eval_fn=eval_on_batch_ep,
                 lr_decay=LR_DECAY_H,
             )
 
@@ -237,7 +237,8 @@ def make_objective(*, n_epochs: int, deps, chan: int = N_CHANNELS):
     return objective, baseline
 
 
-def run_worker(gpu_token: str, worker_rank: int, n_trials_worker: int, storage: str, study_name: str):
+def run_worker(gpu_token: str, worker_rank: int, n_trials_worker: int,
+               storage: str, study_name: str):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_token)
     deps = load_runtime_deps()
     jax = deps["jax"]
@@ -298,9 +299,11 @@ def save_study_plots(study: optuna.Study, out_dir: str):
         try:
             fig = plot_fn(study)
             if isinstance(fig, matplotlib.figure.Figure):
-                fig.savefig(os.path.join(out_dir, f"{name}.png"), dpi=150, bbox_inches="tight")
+                fig.savefig(os.path.join(out_dir, f"{name}.png"),
+                            dpi=150, bbox_inches="tight")
             else:
-                fig.figure.savefig(os.path.join(out_dir, f"{name}.png"), dpi=150, bbox_inches="tight")
+                fig.figure.savefig(os.path.join(out_dir, f"{name}.png"),
+                                   dpi=150, bbox_inches="tight")
             plt.close("all")
             print(f"  Saved {name}.png")
         except Exception as e:
@@ -309,7 +312,7 @@ def save_study_plots(study: optuna.Study, out_dir: str):
 
 def main():
     storage = "sqlite:///deqpc_optuna.db"
-    study_name = f"multi_vode_{ENERGY_TYPE}_{N_EPOCHS_SEARCH}_epochs"
+    study_name = f"ep_{ENERGY_TYPE}_{N_EPOCHS_SEARCH}_epochs"
 
     visible_gpus = get_visible_gpu_tokens()
     workers = min(N_GPU_WORKERS, len(visible_gpus))
@@ -323,8 +326,8 @@ def main():
 
     if workers < N_GPU_WORKERS:
         print(
-            f"Requested {N_GPU_WORKERS} GPU workers, but only {workers} GPU(s) are visible "
-            f"({visible_gpus}). Running with {workers} worker(s)."
+            f"Requested {N_GPU_WORKERS} GPU workers, but only {workers} GPU(s) "
+            f"are visible ({visible_gpus}). Running with {workers} worker(s)."
         )
 
     trials_per_worker = [N_TRIALS // workers] * workers
@@ -336,7 +339,8 @@ def main():
     for worker_rank, gpu_token in enumerate(visible_gpus[:workers]):
         p = ctx.Process(
             target=run_worker,
-            args=(gpu_token, worker_rank, trials_per_worker[worker_rank], storage, study_name),
+            args=(gpu_token, worker_rank, trials_per_worker[worker_rank],
+                  storage, study_name),
             daemon=False,
         )
         p.start()

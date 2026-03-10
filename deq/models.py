@@ -5,6 +5,7 @@ All models implement:
     get_latents()       → batched latent tensor  (B, ...)
     set_latents(z)      → unpack and set on vodes
     latent_energy(z, x_inj, label)  → per-sample scalar energy
+    free_energy(z, x_inj)           → per-sample scalar energy (no readout)
 
 This allows a single, model-agnostic training loop.
 
@@ -91,6 +92,14 @@ class DEQPCModel(pxc.EnergyModule):
 
     def set_latents(self, z):
         self.vode_z.h.set(z)
+
+    def free_energy(self, z, x_inj):
+        """Per-sample internal consistency energy (no readout)."""
+        u_z = self.f(z, x_inj)
+        if self.stop_grad_f.get():
+            u_z = jax.lax.stop_gradient(u_z)
+        diff_energy_fn = get_diff_energy(self.energy_type.get())
+        return diff_energy_fn(z - u_z)
 
     def latent_energy(self, z, x_inj, label):
         """Per-sample energy (called inside vmap(grad(...)))."""
@@ -191,6 +200,20 @@ class MultiVodeDEQPCModel(pxc.EnergyModule):
         n_ch = self.n_channels.get()
         self.vode_z1.h.set(z[:, :n_ch])
         self.vode_z2.h.set(z[:, n_ch:])
+
+    def free_energy(self, z, x_inj):
+        """Per-sample internal consistency energy (no readout)."""
+        n_ch = self.n_channels.get()
+        z1, z2 = z[:n_ch], z[n_ch:]
+
+        pred_z2 = self.f1(z1, x_inj)
+        pred_z1 = self.f2(z2, x_inj)
+        if self.stop_grad_f.get():
+            pred_z2 = jax.lax.stop_gradient(pred_z2)
+            pred_z1 = jax.lax.stop_gradient(pred_z1)
+
+        diff_energy_fn = get_diff_energy(self.energy_type.get())
+        return diff_energy_fn(z1 - pred_z1) + diff_energy_fn(z2 - pred_z2)
 
     def latent_energy(self, z, x_inj, label):
         n_ch = self.n_channels.get()
@@ -302,6 +325,20 @@ class DeepDEQPCModel(pxc.EnergyModule):
         n_ch = self.n_channels.get()
         self.vode_z1.h.set(z[:, :n_ch])
         self.vode_z2.h.set(z[:, n_ch:])
+
+    def free_energy(self, z, x_inj):
+        """Per-sample internal consistency energy (no readout)."""
+        n_ch = self.n_channels.get()
+        z1, z2 = z[:n_ch], z[n_ch:]
+
+        pred_z2 = self.f1(z1, x_inj)
+        pred_z1 = self.f2(z2, x_inj)
+        if self.stop_grad_f.get():
+            pred_z2 = jax.lax.stop_gradient(pred_z2)
+            pred_z1 = jax.lax.stop_gradient(pred_z1)
+
+        diff_energy_fn = get_diff_energy(self.energy_type.get())
+        return diff_energy_fn(z1 - pred_z1) + diff_energy_fn(z2 - pred_z2)
 
     def latent_energy(self, z, x_inj, label):
         n_ch = self.n_channels.get()

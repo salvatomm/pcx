@@ -9,7 +9,7 @@ import numpy as np
 
 def evaluate_accuracy(
     dl,
-    T_steps: int,
+    T_steps,
     *,
     model,
     optim_h,
@@ -17,13 +17,20 @@ def evaluate_accuracy(
     lr_decay: float = 1.0,
     max_samples: int | None = None,
 ) -> float:
-    """Run *eval_fn* over a dataloader and return mean accuracy."""
+    """Run *eval_fn* over a dataloader and return mean accuracy.
+
+    ``T_steps`` can be:
+      - an int   → passed as ``eval_fn(T, x, y_oh, ...)``      (standard)
+      - a tuple  → unpacked as ``eval_fn(*T_steps, x, y_oh, ...)``  (EP)
+    """
+    t_args = T_steps if isinstance(T_steps, tuple) else (T_steps,)
+
     accs = []
     seen = 0
     n_classes = int(model.n_classes.get())
     for x, y in dl:
         y_oh = jax.nn.one_hot(y.numpy(), n_classes)
-        accs.append(eval_fn(T_steps, x.numpy(), y_oh, lr_decay,
+        accs.append(eval_fn(*t_args, x.numpy(), y_oh, lr_decay,
                             model=model, optim_h=optim_h))
         seen += x.shape[0]
         if max_samples is not None and seen >= max_samples:
@@ -33,7 +40,7 @@ def evaluate_accuracy(
 
 def evaluate_epoch(
     test_dl,
-    T_steps: int,
+    T_steps,
     *,
     model,
     optim_h,
