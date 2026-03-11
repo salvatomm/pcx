@@ -76,3 +76,29 @@ class ResNetLayer(px.Module):
     def __call__(self, z: jax.Array, x: jax.Array) -> jax.Array:
         y = self.norm1(jax.nn.relu(self.conv1(z)))
         return self.norm3(jax.nn.relu(z + self.norm2(x + self.conv2(y))))
+    
+
+def _small_init_linear(linear, init_scale: float):
+    """Re-initialise all LayerParams in a pxnn.Linear with N(0, init_scale)."""
+    leaves = jtu.tree_leaves(linear, is_leaf=lambda x: isinstance(x, pxnn.LayerParam))
+    for leaf in leaves:
+        if isinstance(leaf, pxnn.LayerParam):
+            leaf.set(jax.random.normal(px.RKG(), leaf.shape) * init_scale)
+
+
+class FCBlock(px.Module):
+    """Fully-connected implicit block with residual + input injection + LayerNorm.
+
+    f(z, x_inj) = LayerNorm(ReLU(z + Linear(z) + x_inj))
+
+    Mirrors ConvBlock but replaces Conv2d + GroupNorm with Linear + LayerNorm.
+    """
+
+    def __init__(self, dim: int, init_scale: float = 0.005):
+        super().__init__()
+        self.linear = pxnn.Linear(dim, dim, bias=False)
+        self.norm = pxnn.LayerNorm((dim,))
+        _small_init_linear(self.linear, init_scale)
+
+    def __call__(self, z: jax.Array, x_inj: jax.Array) -> jax.Array:
+        return self.norm(jax.nn.relu(z + self.linear(z) + x_inj))
